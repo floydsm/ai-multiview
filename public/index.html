@@ -18,7 +18,7 @@
     .badge .name { border-bottom:1px dashed transparent; cursor:text; }
     .badge .name:hover { border-bottom-color: rgba(255,255,255,.4); }
     .count { background:rgba(255,255,255,.12); padding:2px 6px; border-radius:999px; font-size:11px; }
-    .actions { position:absolute; right:8px; bottom:8px; display:flex; gap:6px; z-index:2; }
+    .actions { position:absolute; left:50%; bottom:8px; transform:translateX(-50%); display:flex; gap:6px; z-index:2; }
     .actions button { font-size:12px; background:rgba(255,255,255,.18); }
     .video { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
     .video iframe { width:100%; height:100%; border:0; object-fit:contain; background:#000; }
@@ -37,20 +37,40 @@
   </div>
 
   <script>
+    // --- Default friendly names from your list (keys normalized: spaces removed) ---
+    const DEFAULT_NAMES = {
+      "QTL07-W02STR003": "Andrew",
+      "QTL13-W02STR013": "Andrew",
+      "QTL12-W02STR012": "Nick",
+      "QTL06-W02STR001": "Nick",
+      "QTL14-W02STR014": "CJ",
+      "QTL15-W02STR015": "CJ",
+      "CQTL1-W01STR001": "Shawn",
+      "QTL08-W01STR004": "Shawn",
+      "QTL10-W02STR010": "Israel",
+      "QTL11-W02STR011": "Phil",
+      "QTL16-W03STR001": "Nuria",     // from "QTL 16"
+      "MXQTL-W13STR002": "Aurora",    // from "MX QTL"
+      "MXQTL2-W13STR003": "Pau",      // from "MX QTL 2"
+      "QTL17-W02STR025": "Robert"
+    };
+
     // --- Layout settings ---
     const TARGET_RATIO = 16/9; // layout uses this for grid sizing; videos use 'contain' to preserve their own ratio
 
     // --- State ---
-    let tiles = []; // {id,name,url,viewers,visible,ratioLabel?, _dom?}
+    let tiles = []; // {id,name,url,viewers,visible,_dom?}
     let grid, header, stage, lastUpdateEl;
     let pollTimer = null;
 
     // --- Storage keys ---
     const nameKey = (id)=>'mv_name_'+(id||'blank');
 
+    const normalizeId = (s) => String(s||"").replace(/\s+/g, "");
+
     // --- Backend fetch ---
     async function fetchActive() {
-      // Support GET or POST; use GET for easy testing in browser too
+      // GET or POST both supported by our function; use GET for easy testing
       const r = await fetch('/.netlify/functions/millicast', { method:'GET' });
       if (!r.ok) throw new Error(await r.text());
       const json = await r.json();
@@ -127,7 +147,7 @@
         v.appendChild(iframe);
         d.appendChild(v);
 
-        // Actions
+        // Centered bottom Hide button
         const actions = document.createElement('div');
         actions.className = 'actions';
         const hideBtn = document.createElement('button');
@@ -156,14 +176,19 @@
           existing.viewers = s.viewers ?? existing.viewers ?? null;
           if (existing._dom?.countEl) existing._dom.countEl.textContent = (existing.viewers ?? '-') + '';
           if (!localStorage.getItem(nameKey(id))) {
-            existing.name = s.name || existing.name;
-            if (existing._dom?.nameEl) existing._dom.nameEl.textContent = existing.name;
+            // prefer our DEFAULT_NAMES if present; else server; but don't override local edit
+            const preferred = DEFAULT_NAMES[normalizeId(id)] || s.name || existing.name;
+            existing.name = preferred;
+            if (existing._dom?.nameEl) existing._dom.nameEl.textContent = preferred;
           }
         } else {
+          // new stream
+          const norm = normalizeId(id);
           const savedName = localStorage.getItem(nameKey(id));
+          const starting = savedName || DEFAULT_NAMES[norm] || s.name || 'Stream';
           tiles.push({
             id,
-            name: savedName || s.name || 'Stream',
+            name: starting,
             url: s.playerUrl || '',
             viewers: s.viewers ?? null,
             visible: true
@@ -193,8 +218,10 @@
         const list = await fetchActive();
         tiles = list.map(s => {
           const id = s.id || s.name || s.playerUrl;
+          const norm = normalizeId(id);
           const savedName = localStorage.getItem(nameKey(id));
-          return { id, name: savedName || s.name || 'Stream', url: s.playerUrl || '', viewers: s.viewers ?? null, visible: true };
+          const starting = savedName || DEFAULT_NAMES[norm] || s.name || 'Stream';
+          return { id, name: starting, url: s.playerUrl || '', viewers: s.viewers ?? null, visible: true };
         });
         render();
         lastUpdateEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
