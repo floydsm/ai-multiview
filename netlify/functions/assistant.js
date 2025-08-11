@@ -14,10 +14,10 @@ exports.handler = async (event) => {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      model,
-      input: [ { role: "user", content: `Command: ${prompt}` } ],
-      response_format: { type: "json_object" }
-    })
+  model,
+  input: [ { role: "user", content: `Command: ${prompt}` } ],
+  text: { format: "json" }
+})
   });
   const data = await r.json();
   if (!r.ok) return json(r.status, { error: data });
