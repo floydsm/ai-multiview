@@ -16,7 +16,7 @@ exports.handler = async (event) => {
     body: JSON.stringify({
   model,
   input: [ { role: "user", content: `Command: ${prompt}` } ],
-  text: { format: "json" }
+  text: { format: { type: "json" } }
 })
   });
   const data = await r.json();
