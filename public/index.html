@@ -10,34 +10,50 @@
     header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:12px; background:#1a1a1a; position:sticky; top:0; z-index:10; }
     button { background:#6d5bf6; color:#fff; border:0; padding:8px 12px; border-radius:10px; cursor:pointer; }
     button.secondary { background:#2f2f2f; }
-    button.ghost { background:transparent; border:1px solid #444; }
     button:disabled { opacity:.6; cursor:default; }
-    input[type=number], input[type=text], select { padding:6px 8px; border-radius:8px; border:0; }
-    .toolbar { display:flex; gap:8px; align-items:center; }
+    input[type=text], select { padding:6px 8px; border-radius:8px; border:0; }
     .spacer { flex:1; }
-    .grid { display:grid; gap:8px; padding:12px; }
-    /* Auto-fit grid: tiles grow to fill, wrap when too narrow */
-    .grid.auto { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-    .tile { background:#000; border-radius:10px; position:relative; overflow:hidden; min-height:220px; }
-    .badge { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:4px 8px; border-radius:8px; font-size:12px; }
-    .chip { position:absolute; right:8px; top:8px; background:rgba(255,255,255,.1); padding:4px 8px; border-radius:999px; font-size:11px; }
-    .tile .actions { position:absolute; right:8px; bottom:8px; display:flex; gap:6px; }
+    .grid { display:grid; gap:12px; padding:12px; }
+    .grid.auto { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .tile { background:#000; border-radius:12px; position:relative; overflow:hidden; }
+    .badge { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:4px 8px; border-radius:8px; font-size:12px; z-index:2; }
+    .meta { position:absolute; right:8px; top:8px; display:flex; gap:6px; z-index:2; }
+    .meta select { background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.2); }
+    .tile .actions { position:absolute; right:8px; bottom:8px; display:flex; gap:6px; z-index:2; }
     .tile .actions button { font-size:12px; background:rgba(255,255,255,.2); }
-    .tile.hidden { outline:2px dashed #555; background:#151515; }
     .error { background:#b00020; padding:8px 12px; margin:12px; border-radius:8px; }
-    iframe { width:100%; height:100%; border:0; }
-    .hint { opacity:.8; font-size:13px; }
+    .video { position: relative; width: 100%; background:#000; }
+    .video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+    .spotwrap { padding:12px; display:flex; justify-content:center; }
+    .spot { width: min(92vw, 1600px); }
   </style>
 </head>
 <body>
   <div id="root"></div>
 
-  <!-- React via CDN (no build step) -->
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
   <script>
     const { useState, useEffect, useMemo } = React;
+
+    const ASPECTS = [
+      { key:'16:9', val: 16/9 },
+      { key:'4:3',  val: 4/3 },
+      { key:'1:1',  val: 1 },
+      { key:'21:9', val: 21/9 },
+      { key:'9:16', val: 9/16 },
+      { key:'auto', val: 16/9 }, // default fallback
+    ];
+
+    const DEFAULT_ASPECT = '16:9';
+
+    function getAspectValue(label){
+      const found = ASPECTS.find(a => a.key === label) || ASPECTS.find(a=>a.key===DEFAULT_ASPECT);
+      return found.val;
+    }
+
+    function storageKeyFor(url){ return 'mv_ratio_' + (url || 'blank'); }
 
     async function fetchActiveStreams() {
       const r = await fetch('/.netlify/functions/millicast', { method:'POST' });
@@ -56,27 +72,32 @@
     }
 
     function App(){
-      const [tiles, setTiles] = useState([]); // [{name, url, visible:true}]
+      const [tiles, setTiles] = useState([]); // [{name, url, visible:true, aspect:'16:9'}]
       const [loading, setLoading] = useState(false);
       const [err, setErr] = useState('');
       const [cmd, setCmd] = useState('');
-      const [limit, setLimit] = useState('all'); // 'all' or number
+      const [limit, setLimit] = useState('all');
       const [spot, setSpot] = useState(null);
 
-      // Load active streams on first load
+      // Load actives and restore saved aspect ratios
       useEffect(()=>{
         (async () => {
           try{
             setLoading(true); setErr('');
             const streams = await fetchActiveStreams();
-            const mapped = streams.map(s => ({ name: s.name || 'Stream', url: s.playerUrl || '', visible: true }));
+            const mapped = streams.map(s => {
+              const url = s.playerUrl || '';
+              const saved = localStorage.getItem(storageKeyFor(url));
+              const aspect = saved || DEFAULT_ASPECT;
+              return { name: s.name || 'Stream', url, visible: true, aspect };
+            });
             setTiles(mapped);
           }catch(e){ setErr(e.message || 'Failed to load active streams'); }
           finally{ setLoading(false); }
         })();
       },[]);
 
-      // Apply limit when it changes
+      // Limit visible count
       useEffect(()=>{
         setTiles(prev => {
           const total = prev.length;
@@ -89,30 +110,20 @@
         });
       }, [limit]);
 
-      const visibleTiles = useMemo(()=> tiles.filter(t => t.visible), [tiles]);
+      function showAll(){ setTiles(prev => prev.map(t => ({ ...t, visible: true }))); setLimit('all'); }
+      function hideAll(){ setTiles(prev => prev.map(t => ({ ...t, visible: false }))); }
+      function toggleVisible(index){ setTiles(prev => prev.map((t,i) => i===index ? ({ ...t, visible: !t.visible }) : t)); }
 
-      function showAll(){
-        setTiles(prev => prev.map(t => ({ ...t, visible: true })));
-        setLimit('all');
-      }
-      function hideAll(){
-        setTiles(prev => prev.map(t => ({ ...t, visible: false })));
-      }
-      function toggleVisible(index){
-        setTiles(prev => prev.map((t,i) => i===index ? ({ ...t, visible: !t.visible }) : t));
-      }
-
-      function setGridByCount(count){
-        // Optional helper if you want a fixed grid for a count.
-        // With auto-fit we don't need this, but assistant commands might set exact rows/cols.
+      function changeAspect(index, label){
+        setTiles(prev => prev.map((t,i) => {
+          if (i!==index) return t;
+          localStorage.setItem(storageKeyFor(t.url), label);
+          return { ...t, aspect: label };
+        }));
       }
 
       function applyIntent(intent){
         if (!intent || !intent.type) return;
-        if (intent.type === 'setGrid') {
-          // For auto-fit, we don't need to track rows/cols; still accept the command for compatibility.
-          // No-op visually; grid will auto-fit based on visible tiles.
-        }
         if (intent.type === 'fullscreen') {
           const idx = intent.slot - 1;
           setSpot(Number.isInteger(idx) ? idx : null);
@@ -126,12 +137,16 @@
           });
         }
         if (intent.type === 'loadActive') {
-          // Reload actives
           (async () => {
             try{
               setLoading(true); setErr('');
               const streams = await fetchActiveStreams();
-              const mapped = streams.map(s => ({ name: s.name || 'Stream', url: s.playerUrl || '', visible: true }));
+              const mapped = streams.map(s => {
+                const url = s.playerUrl || '';
+                const saved = localStorage.getItem(storageKeyFor(url));
+                const aspect = saved || DEFAULT_ASPECT;
+                return { name: s.name || 'Stream', url, visible: true, aspect };
+              });
               setTiles(mapped);
               setLimit('all');
             }catch(e){ setErr(e.message || 'Failed to load active streams'); }
@@ -140,7 +155,13 @@
         }
         if (intent.type === 'setStream') {
           const idx = intent.slot - 1;
-          setTiles(prev => prev.map((t,i)=> i===idx ? ({ ...t, url:intent.playerUrl, visible: true }) : t));
+          setTiles(prev => prev.map((t,i)=> {
+            if (i!==idx) return t;
+            const newUrl = intent.playerUrl;
+            const saved = localStorage.getItem(storageKeyFor(newUrl));
+            const aspect = saved || DEFAULT_ASPECT;
+            return ({ ...t, url:newUrl, visible: true, aspect });
+          }));
         }
         if (intent.type === 'nameSlot') {
           const idx = intent.slot - 1;
@@ -162,37 +183,36 @@
       async function runCommand(){
         if (!cmd.trim()) return;
         try {
-          setLoading(true); setErr('');
+          setErr('');
           const intent = await askAssistant(cmd.trim());
           applyIntent(intent);
+          setCmd('');
         } catch(e){
           setErr(e.message || 'Assistant error');
-        } finally {
-          setLoading(false); setCmd('');
         }
       }
 
       return React.createElement(React.Fragment, null,
         React.createElement('header', null,
-          React.createElement('div', { className:'toolbar' },
-            React.createElement('button', { onClick: () => { /* manual reload */ (async ()=>{ try{ setLoading(true); setErr(''); const s=await fetchActiveStreams(); setTiles(s.map(x=>({name:x.name||'Stream', url:x.playerUrl||'', visible:true}))); setLimit('all'); }catch(e){ setErr(e.message||'Failed'); } finally{ setLoading(false);} })(); } }, 'Reload Active'),
-            React.createElement('button', { className:'secondary', onClick: showAll }, 'Show All'),
-            React.createElement('button', { className:'secondary', onClick: hideAll }, 'Hide All'),
-            React.createElement('span', { className:'hint' }, 'Limit:'),
-            React.createElement('select', { value: String(limit), onChange: e=> setLimit(e.target.value) },
-              React.createElement('option', { value:'all' }, 'All'),
-              [1,2,3,4,5,6,7,8,9,10,12,16,20,25,36].map(n => React.createElement('option', { key:n, value:String(n) }, String(n)))
-            )
+          React.createElement('button', { onClick: () => { (async ()=>{ try{ setLoading(true); setErr(''); const s=await fetchActiveStreams(); const mapped=s.map(x=>{ const url=x.playerUrl||''; const saved=localStorage.getItem(storageKeyFor(url)); const aspect=saved||DEFAULT_ASPECT; return({name:x.name||'Stream', url, visible:true, aspect});}); setTiles(mapped); setLimit('all'); }catch(e){ setErr(e.message||'Failed'); } finally{ setLoading(false);} })(); } }, 'Reload Active'),
+          React.createElement('button', { className:'secondary', onClick: showAll }, 'Show All'),
+          React.createElement('button', { className:'secondary', onClick: hideAll }, 'Hide All'),
+          React.createElement('span', null, 'Limit:'),
+          React.createElement('select', { value: String(limit), onChange: e=> setLimit(e.target.value) },
+            React.createElement('option', { value:'all' }, 'All'),
+            [1,2,3,4,5,6,8,9,10,12,16,20,25,36].map(n => React.createElement('option', { key:n, value:String(n) }, String(n)))
           ),
           React.createElement('div', { className:'spacer' }),
-          React.createElement('input', { type:'text', placeholder:"Type a command: '3x3', 'fullscreen 2', 'swap 1 and 3', 'load active'", value:cmd, onChange:e=>setCmd(e.target.value), onKeyDown:e=>{if(e.key==='Enter') runCommand();}, style:{ width:420 } }),
+          React.createElement('input', { type:'text', placeholder:"Command: 'fullscreen 2', 'swap 1 and 3', 'load active'", value:cmd, onChange:e=>setCmd(e.target.value), onKeyDown:e=>{if(e.key==='Enter') runCommand();}, style:{ width:420 } }),
           React.createElement('button', { onClick: runCommand }, 'Send')
         ),
         err && React.createElement('div', { className:'error' }, err),
-        spot !== null ? React.createElement('div', { style:{ padding:12 } },
-          React.createElement('div', { className:'tile', style:{ height:'80vh' } },
+        (spot !== null) ? React.createElement('div', { className:'spotwrap' },
+          React.createElement('div', { className:'tile spot' },
             React.createElement('div', { className:'badge' }, tiles[spot]?.name || 'Slot'),
-            React.createElement('iframe', { src: tiles[spot]?.url || 'about:blank', allow:'autoplay; fullscreen' }),
+            React.createElement('div', { className:'video', style:{ aspectRatio: getAspectValue(tiles[spot]?.aspect || DEFAULT_ASPECT) } },
+              React.createElement('iframe', { src: tiles[spot]?.url || 'about:blank', allow:'autoplay; fullscreen' })
+            ),
             React.createElement('div', { className:'actions' },
               React.createElement('button', { onClick:()=>setSpot(null) }, 'Exit Fullscreen')
             )
@@ -200,8 +220,14 @@
         ) : React.createElement('div', { className:'grid auto' },
           tiles.map((t,i)=> t.visible && React.createElement('div', { key:i, className:'tile' },
             React.createElement('div', { className:'badge' }, t.name || ('Slot ' + (i+1))),
-            React.createElement('div', { className:'chip' }, '#' + (i+1)),
-            React.createElement('iframe', { src: t.url || 'about:blank', allow:'autoplay; fullscreen' }),
+            React.createElement('div', { className:'meta' },
+              React.createElement('select', { value: t.aspect, onChange:e=>changeAspect(i, e.target.value), title:'Aspect ratio' },
+                ASPECTS.map(a => React.createElement('option', { key:a.key, value:a.key }, a.key))
+              )
+            ),
+            React.createElement('div', { className:'video', style:{ aspectRatio: getAspectValue(t.aspect) } },
+              React.createElement('iframe', { src: t.url || 'about:blank', allow:'autoplay; fullscreen' })
+            ),
             React.createElement('div', { className:'actions' },
               React.createElement('button', { onClick:()=>setSpot(i) }, 'Fullscreen'),
               React.createElement('button', { onClick:()=>toggleVisible(i) }, 'Hide')
