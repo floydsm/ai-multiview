@@ -1,0 +1,7 @@
+[build]
+  publish = "public"
+  command = ""
+
+[functions]
+  node_bundler = "esbuild"
+  node_version = "18"
