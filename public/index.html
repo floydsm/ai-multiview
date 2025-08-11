@@ -11,14 +11,15 @@
     button { background:#6d5bf6; color:#fff; border:0; padding:8px 12px; border-radius:10px; cursor:pointer; }
     button.secondary { background:#2f2f2f; }
     button:disabled { opacity:.6; cursor:default; }
-    select { padding:6px 8px; border-radius:8px; border:0; }
+    select, input[type=text] { padding:6px 8px; border-radius:8px; border:0; }
     .spacer { flex:1; }
     .grid { display:grid; gap:12px; padding:12px; }
     .grid.auto { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
     .tile { background:#000; border-radius:12px; position:relative; overflow:hidden; }
-    .badge { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:4px 8px; border-radius:8px; font-size:12px; z-index:2; }
+    .badge { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:4px 8px; border-radius:8px; font-size:12px; z-index:2; display:flex; gap:6px; align-items:center; }
+    .count { background:rgba(255,255,255,.12); padding:2px 6px; border-radius:999px; font-size:11px; }
     .meta { position:absolute; right:8px; top:8px; display:flex; gap:6px; z-index:2; }
-    .meta select { background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.2); }
+    .meta select, .meta input { background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.2); }
     .tile .actions { position:absolute; right:8px; bottom:8px; display:flex; gap:6px; z-index:2; }
     .tile .actions button { font-size:12px; background:rgba(255,255,255,.2); }
     .error { background:#b00020; padding:8px 12px; margin:12px; border-radius:8px; }
@@ -37,6 +38,9 @@
   <script>
     const { useState, useEffect } = React;
 
+    // ---- Settings ----
+    const AUTO_LOAD_ON_OPEN = true; // set to false if you prefer manual only
+
     const ASPECTS = [
       { key:'16:9', val: 16/9 },
       { key:'4:3',  val: 4/3 },
@@ -46,35 +50,48 @@
     ];
     const DEFAULT_ASPECT = '16:9';
     const aspectVal = (label) => (ASPECTS.find(a=>a.key===label)?.val || 16/9);
-    const ratioKey = (url) => 'mv_ratio_' + (url || 'blank');
 
-    async function fetchActiveStreams() {
+    const ratioKey = (id) => 'mv_ratio_' + (id || 'blank');
+    const nameKey  = (id) => 'mv_name_'  + (id || 'blank');
+
+    async function getActive() {
       const r = await fetch('/.netlify/functions/millicast', { method:'POST' });
       if (!r.ok) throw new Error(await r.text());
-      return (await r.json()).streams;
+      return (await r.json()).streams || [];
     }
 
     function App(){
-      const [tiles, setTiles] = useState([]); // {name,url,visible,aspect}
+      const [tiles, setTiles] = useState([]); // {id,name,url,viewers,visible,aspect}
       const [err, setErr] = useState('');
       const [limit, setLimit] = useState('all');
       const [spot, setSpot] = useState(null);
+      const [loading, setLoading] = useState(false);
 
-      // Load actives and restore aspect per URL
-      useEffect(()=>{
-        (async () => {
-          try{
-            setErr('');
-            const streams = await fetchActiveStreams();
-            const mapped = streams.map(s => {
-              const url = s.playerUrl || '';
-              const saved = localStorage.getItem(ratioKey(url));
-              return { name: s.name || 'Stream', url, visible: true, aspect: saved || DEFAULT_ASPECT };
-            });
-            setTiles(mapped);
-          }catch(e){ setErr(e.message || 'Failed to load active streams'); }
-        })();
-      },[]);
+      async function loadActive(){
+        try{
+          setLoading(true); setErr('');
+          const streams = await getActive();
+          const mapped = streams.map(s => {
+            const id = s.id || s.name || s.playerUrl;
+            const localName = localStorage.getItem(nameKey(id));
+            const url = s.playerUrl || '';
+            const savedAspect = localStorage.getItem(ratioKey(id));
+            return {
+              id,
+              name: localName || s.name || 'Stream',
+              url,
+              viewers: s.viewers ?? null,
+              visible: true,
+              aspect: savedAspect || DEFAULT_ASPECT
+            };
+          });
+          setTiles(mapped);
+          setLimit('all');
+        }catch(e){ setErr(e.message || 'Failed to load active streams'); }
+        finally{ setLoading(false); }
+      }
+
+      useEffect(()=>{ if (AUTO_LOAD_ON_OPEN) loadActive(); },[]);
 
       // Apply limit
       useEffect(()=>{
@@ -94,13 +111,19 @@
       const toggleVisible = (i)=> setTiles(prev => prev.map((t,idx)=> idx===i ? ({...t, visible:!t.visible}) : t));
       const changeAspect = (i,label)=> setTiles(prev => prev.map((t,idx)=>{
         if(idx!==i) return t;
-        localStorage.setItem(ratioKey(t.url), label);
+        localStorage.setItem(ratioKey(t.id), label);
         return {...t, aspect: label};
+      }));
+      const rename = (i, val)=> setTiles(prev => prev.map((t,idx)=>{
+        if(idx!==i) return t;
+        localStorage.setItem(nameKey(t.id), val);
+        return {...t, name: val};
       }));
 
       return React.createElement(React.Fragment, null,
         React.createElement('header', null,
-          React.createElement('button', { onClick: showAll }, 'Show All'),
+          React.createElement('button', { onClick: loadActive, disabled: loading }, loading ? 'Getting Active…' : 'Get Active'),
+          React.createElement('button', { className:'secondary', onClick: showAll }, 'Show All'),
           React.createElement('button', { className:'secondary', onClick: hideAll }, 'Hide All'),
           React.createElement('span', null, 'Limit:'),
           React.createElement('select', { value: String(limit), onChange: e=> setLimit(e.target.value) },
@@ -111,7 +134,10 @@
         err && React.createElement('div', { className:'error' }, err),
         (spot !== null) ? React.createElement('div', { className:'spotwrap' },
           React.createElement('div', { className:'tile spot' },
-            React.createElement('div', { className:'badge' }, tiles[spot]?.name || 'Slot'),
+            React.createElement('div', { className:'badge' },
+              tiles[spot]?.name || 'Slot',
+              tiles[spot]?.viewers != null && React.createElement('span', { className:'count', title:'Viewers' }, tiles[spot].viewers)
+            ),
             React.createElement('div', { className:'video', style:{ aspectRatio: aspectVal(tiles[spot]?.aspect || DEFAULT_ASPECT) } },
               React.createElement('iframe', { src: tiles[spot]?.url || 'about:blank', allow:'autoplay; fullscreen' })
             ),
@@ -121,8 +147,14 @@
           )
         ) : React.createElement('div', { className:'grid auto' },
           tiles.map((t,i)=> t.visible && React.createElement('div', { key:i, className:'tile' },
-            React.createElement('div', { className:'badge' }, t.name || ('Slot ' + (i+1))),
+            React.createElement('div', { className:'badge' },
+              t.name || ('Slot ' + (i+1)),
+              t.viewers != null && React.createElement('span', { className:'count', title:'Viewers' }, t.viewers)
+            ),
             React.createElement('div', { className:'meta' },
+              React.createElement('input', {
+                value: t.name, onChange: e=>rename(i, e.target.value), title:'Custom name', size: 14
+              }),
               React.createElement('select', { value: t.aspect, onChange:e=>changeAspect(i, e.target.value), title:'Aspect ratio' },
                 ASPECTS.map(a => React.createElement('option', { key:a.key, value:a.key }, a.key))
               )
