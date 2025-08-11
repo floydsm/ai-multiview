@@ -37,8 +37,9 @@
   </div>
 
   <script>
-    // --- Default friendly names from your list (keys normalized: spaces removed) ---
-    const DEFAULT_NAMES = {
+    // ---- Loose-matching default names ----
+    // We'll normalize keys and incoming IDs/names by removing non-alphanumerics and uppercasing.
+    const RAW_DEFAULT_NAMES = {
       "QTL07-W02STR003": "Andrew",
       "QTL13-W02STR013": "Andrew",
       "QTL12-W02STR012": "Nick",
@@ -49,35 +50,32 @@
       "QTL08-W01STR004": "Shawn",
       "QTL10-W02STR010": "Israel",
       "QTL11-W02STR011": "Phil",
-      "QTL16-W03STR001": "Nuria",     // from "QTL 16"
-      "MXQTL-W13STR002": "Aurora",    // from "MX QTL"
-      "MXQTL2-W13STR003": "Pau",      // from "MX QTL 2"
+      "QTL 16-W03STR001": "Nuria",     // includes space variant
+      "QTL16-W03STR001": "Nuria",
+      "MX QTL-W13STR002": "Aurora",
+      "MXQTL-W13STR002": "Aurora",
+      "MX QTL 2-W13STR003": "Pau",
+      "MXQTL2-W13STR003": "Pau",
       "QTL17-W02STR025": "Robert"
     };
+    const norm = (s) => String(s||"").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const DEFAULT_NAMES = Object.fromEntries(Object.entries(RAW_DEFAULT_NAMES).map(([k,v]) => [norm(k), v]));
 
-    // --- Layout settings ---
     const TARGET_RATIO = 16/9; // layout uses this for grid sizing; videos use 'contain' to preserve their own ratio
 
-    // --- State ---
     let tiles = []; // {id,name,url,viewers,visible,_dom?}
     let grid, header, stage, lastUpdateEl;
     let pollTimer = null;
 
-    // --- Storage keys ---
     const nameKey = (id)=>'mv_name_'+(id||'blank');
 
-    const normalizeId = (s) => String(s||"").replace(/\s+/g, "");
-
-    // --- Backend fetch ---
     async function fetchActive() {
-      // GET or POST both supported by our function; use GET for easy testing
       const r = await fetch('/.netlify/functions/millicast', { method:'GET' });
       if (!r.ok) throw new Error(await r.text());
       const json = await r.json();
       return json.streams || [];
     }
 
-    // --- Fit-to-screen grid math ---
     function computeBestColumns(n, W, H, ratio) {
       let bestC = 1, bestArea = -1;
       for (let c = 1; c <= n; c++) {
@@ -99,12 +97,10 @@
       const W = rect.width, H = rect.height;
       const cols = computeBestColumns(n, W, H, TARGET_RATIO);
       const rows = Math.ceil(n / cols);
-
       grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
       grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
     }
 
-    // --- Render ---
     function render() {
       grid.innerHTML = '';
       tiles.forEach((t, i) => {
@@ -112,20 +108,19 @@
         const d = document.createElement('div');
         d.className = 'tile';
 
-        // Badge (editable name + viewers)
         const badge = document.createElement('div');
         badge.className = 'badge';
 
         const nameSpan = document.createElement('span');
         nameSpan.className = 'name';
-        nameSpan.textContent = t.name || ('Slot ' + (i+1));
+        nameSpan.textContent = t.name || ('Stream ' + (i+1));
         nameSpan.title = 'Click to rename';
         nameSpan.contentEditable = true;
         nameSpan.addEventListener('keydown', (ev)=>{
           if (ev.key === 'Enter') { ev.preventDefault(); nameSpan.blur(); }
         });
         nameSpan.addEventListener('blur', ()=>{
-          const newName = nameSpan.textContent.trim() || t.name || ('Slot ' + (i+1));
+          const newName = nameSpan.textContent.trim() || t.name || ('Stream ' + (i+1));
           t.name = newName;
           localStorage.setItem(nameKey(t.id), newName);
           nameSpan.textContent = newName;
@@ -138,7 +133,6 @@
         badge.appendChild(count);
         d.appendChild(badge);
 
-        // Video
         const v = document.createElement('div');
         v.className = 'video';
         const iframe = document.createElement('iframe');
@@ -147,7 +141,6 @@
         v.appendChild(iframe);
         d.appendChild(v);
 
-        // Centered bottom Hide button
         const actions = document.createElement('div');
         actions.className = 'actions';
         const hideBtn = document.createElement('button');
@@ -156,14 +149,27 @@
         actions.appendChild(hideBtn);
         d.appendChild(actions);
 
-        // Keep refs for live updates
         t._dom = { countEl: count, nameEl: nameSpan };
         grid.appendChild(d);
       });
       layout();
     }
 
-    // --- Merge updates without reloading iframes ---
+    function pickDefaultName(id, serverName) {
+      const nId = norm(id);
+      const nSrv = norm(serverName);
+      // Direct lookup
+      if (DEFAULT_NAMES[nId]) return DEFAULT_NAMES[nId];
+      if (DEFAULT_NAMES[nSrv]) return DEFAULT_NAMES[nSrv];
+      // Soft match: if any key is contained in the id/name or vice versa
+      for (const [k, v] of Object.entries(DEFAULT_NAMES)) {
+        if (nId.includes(k) || k.includes(nId) || nSrv.includes(k) || k.includes(nSrv)) {
+          return v;
+        }
+      }
+      return serverName || id || 'Stream';
+    }
+
     function mergeUpdate(newList) {
       const idx = new Map(tiles.map(t=>[t.id, t]));
       const newIds = new Set();
@@ -172,34 +178,30 @@
         newIds.add(id);
         const existing = idx.get(id);
         if (existing) {
-          // update viewers only (and server name if user hasn't customized locally)
           existing.viewers = s.viewers ?? existing.viewers ?? null;
           if (existing._dom?.countEl) existing._dom.countEl.textContent = (existing.viewers ?? '-') + '';
+          // Only update the name if user hasn't customized locally
           if (!localStorage.getItem(nameKey(id))) {
-            // prefer our DEFAULT_NAMES if present; else server; but don't override local edit
-            const preferred = DEFAULT_NAMES[normalizeId(id)] || s.name || existing.name;
-            existing.name = preferred;
-            if (existing._dom?.nameEl) existing._dom.nameEl.textContent = preferred;
+            const fallback = pickDefaultName(id, s.name);
+            existing.name = fallback;
+            if (existing._dom?.nameEl) existing._dom.nameEl.textContent = fallback;
           }
         } else {
-          // new stream
-          const norm = normalizeId(id);
           const savedName = localStorage.getItem(nameKey(id));
-          const starting = savedName || DEFAULT_NAMES[norm] || s.name || 'Stream';
+          const fallback = pickDefaultName(id, s.name);
           tiles.push({
             id,
-            name: starting,
+            name: savedName || fallback,
             url: s.playerUrl || '',
             viewers: s.viewers ?? null,
             visible: true
           });
         }
       });
-      // Hide those that disappeared from active
+      // Hide streams that are no longer active
       tiles = tiles.map(t => newIds.has(t.id) ? t : ({ ...t, visible: false }));
     }
 
-    // --- Polling (every 5s) ---
     async function refreshTick() {
       try {
         const list = await fetchActive();
@@ -212,16 +214,14 @@
       pollTimer = setInterval(refreshTick, 5000);
     }
 
-    // --- Initial load ---
     async function initialLoad() {
       try{
         const list = await fetchActive();
         tiles = list.map(s => {
           const id = s.id || s.name || s.playerUrl;
-          const norm = normalizeId(id);
           const savedName = localStorage.getItem(nameKey(id));
-          const starting = savedName || DEFAULT_NAMES[norm] || s.name || 'Stream';
-          return { id, name: starting, url: s.playerUrl || '', viewers: s.viewers ?? null, visible: true };
+          const fallback = pickDefaultName(id, s.name);
+          return { id, name: savedName || fallback, url: s.playerUrl || '', viewers: s.viewers ?? null, visible: true };
         });
         render();
         lastUpdateEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
@@ -229,7 +229,6 @@
       } catch (e) {}
     }
 
-    // --- Setup ---
     window.addEventListener('DOMContentLoaded', () => {
       header = document.getElementById('topbar');
       stage = document.querySelector('.stage');
@@ -246,10 +245,8 @@
       new ResizeObserver(()=>{ resizeHeaderVar(); render(); }).observe(document.body);
       new ResizeObserver(()=>{ render(); }).observe(stage);
 
-      // Show All button
       document.getElementById('btnShowAll').onclick = () => { tiles = tiles.map(t=>({...t, visible:true})); render(); layout(); };
 
-      // auto load on open
       initialLoad();
     });
   </script>
