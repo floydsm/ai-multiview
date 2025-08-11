@@ -1,180 +1,230 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Millicast Multiviewer</title>
   <style>
-    body {
-      margin: 0;
-      background: black;
-      color: white;
-      font-family: sans-serif;
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
-      overflow: hidden;
-    }
-    header {
-      background: #111;
-      padding: 0.5em;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      gap: 1em;
-      flex-wrap: wrap;
-    }
-    header button, header label, header select, header input {
-      font-size: 1em;
-      padding: 0.3em 0.6em;
-      border: none;
-      border-radius: 4px;
-    }
-    header button {
-      background: #444;
-      color: white;
-      cursor: pointer;
-    }
-    header button:hover {
-      background: #666;
-    }
-    #grid {
-      flex: 1;
-      display: grid;
-      gap: 2px;
-      background: black;
-      padding: 2px;
-    }
-    iframe {
-      width: 100%;
-      height: 100%;
-      border: none;
-      background: black;
-      object-fit: contain;
-    }
-    .tile {
-      position: relative;
-      background: black;
-    }
-    .overlay {
-      position: absolute;
-      top: 4px;
-      left: 4px;
-      background: rgba(0, 0, 0, 0.6);
-      padding: 2px 6px;
-      border-radius: 3px;
-      font-size: 0.9em;
-    }
-    .hidden {
-      display: none;
-    }
+    :root { color-scheme: dark; }
+    html, body { height: 100%; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#111; color:#fff; overflow:hidden; }
+    header { display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:center; padding:10px; background:#1a1a1a; position:relative; z-index:1; }
+    button { background:#6d5bf6; color:#fff; border:0; padding:8px 12px; border-radius:10px; cursor:pointer; }
+    button.secondary { background:#2f2f2f; }
+    .stage { height: calc(100vh - var(--header-h, 56px)); padding:10px; box-sizing: border-box; }
+    .grid { display:grid; gap:10px; width:100%; height:100%; }
+    .tile { background:#000; border-radius:12px; position:relative; overflow:hidden; }
+    .badge { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:4px 8px; border-radius:8px; font-size:13px; z-index:2; display:flex; gap:8px; align-items:center; }
+    .badge .name { border-bottom:1px dashed transparent; cursor:text; }
+    .badge .name:hover { border-bottom-color: rgba(255,255,255,.4); }
+    .count { background:rgba(255,255,255,.12); padding:2px 6px; border-radius:999px; font-size:11px; }
+    .actions { position:absolute; right:8px; bottom:8px; display:flex; gap:6px; z-index:2; }
+    .actions button { font-size:12px; background:rgba(255,255,255,.18); }
+    .video { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
+    .video iframe { width:100%; height:100%; border:0; object-fit:contain; background:#000; }
+    #lastUpdate { font-size:12px; opacity:.75; margin-left:8px; }
   </style>
 </head>
 <body>
-  <header>
-    <button id="getActive">Get Active</button>
-    <label><input type="checkbox" id="toggleAuto" /> Auto refresh</label>
-    <select id="refreshInterval">
-      <option value="5000">5s</option>
-      <option value="10000" selected>10s</option>
-      <option value="30000">30s</option>
-    </select>
-    <span id="lastUpdated" style="font-size:0.9em;opacity:0.8"></span>
+  <header id="topbar">
+    <button id="btnActive">Get Active</button>
+    <button class="secondary" id="btnShowAll">Show All</button>
+    <span id="lastUpdate"></span>
   </header>
-  <div id="grid"></div>
+
+  <div class="stage">
+    <div id="grid" class="grid"></div>
+  </div>
 
   <script>
-    const gridEl = document.getElementById('grid');
-    const getActiveBtn = document.getElementById('getActive');
-    const toggleAuto = document.getElementById('toggleAuto');
-    const refreshIntervalEl = document.getElementById('refreshInterval');
-    const lastUpdatedEl = document.getElementById('lastUpdated');
-    let streams = [];
-    let autoTimer = null;
+    // --- Layout settings ---
+    const TARGET_RATIO = 16/9; // layout uses this for grid sizing; videos use 'contain' to preserve their own ratio
 
+    // --- State ---
+    let tiles = []; // {id,name,url,viewers,visible,ratioLabel?, _dom?}
+    let grid, header, stage, lastUpdateEl;
+    let pollTimer = null;
+
+    // --- Storage keys ---
+    const nameKey = (id)=>'mv_name_'+(id||'blank');
+
+    // --- Backend fetch ---
     async function fetchActive() {
-      try {
-        const res = await fetch('/.netlify/functions/millicast', { method: 'POST' });
-        const data = await res.json();
-        streams = data.streams || [];
-        renderGrid();
-        updateLastUpdated();
-      } catch (e) {
-        console.error('Error fetching streams', e);
+      // Support GET or POST; use GET for easy testing in browser too
+      const r = await fetch('/.netlify/functions/millicast', { method:'GET' });
+      if (!r.ok) throw new Error(await r.text());
+      const json = await r.json();
+      return json.streams || [];
+    }
+
+    // --- Fit-to-screen grid math ---
+    function computeBestColumns(n, W, H, ratio) {
+      let bestC = 1, bestArea = -1;
+      for (let c = 1; c <= n; c++) {
+        const rows = Math.ceil(n / c);
+        const tileW = W / c;
+        const tileH = tileW / ratio;
+        const totalH = rows * tileH;
+        if (totalH <= H) {
+          const area = tileW * tileH;
+          if (area > bestArea) { bestArea = area; bestC = c; }
+        }
       }
+      return bestArea < 0 ? Math.min(n, Math.max(1, Math.floor(W / 240))) : bestC;
+    }
+    function layout() {
+      const visible = tiles.filter(t=>t.visible);
+      const n = visible.length || 1;
+      const rect = stage.getBoundingClientRect();
+      const W = rect.width, H = rect.height;
+      const cols = computeBestColumns(n, W, H, TARGET_RATIO);
+      const rows = Math.ceil(n / cols);
+
+      grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
     }
 
-    function updateLastUpdated() {
-      lastUpdatedEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
-    }
+    // --- Render ---
+    function render() {
+      grid.innerHTML = '';
+      tiles.forEach((t, i) => {
+        if (!t.visible) return;
+        const d = document.createElement('div');
+        d.className = 'tile';
 
-    function fitGrid() {
-      const count = streams.length;
-      const containerHeight = window.innerHeight - document.querySelector('header').offsetHeight;
-      let cols = Math.ceil(Math.sqrt(count));
-      let rows = Math.ceil(count / cols);
-      let tileHeight = containerHeight / rows;
-      let tileWidth = window.innerWidth / cols;
-      let ratio = 16 / 9;
-      if (tileWidth / tileHeight > ratio) {
-        tileWidth = tileHeight * ratio;
-      } else {
-        tileHeight = tileWidth / ratio;
-      }
-      gridEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-      gridEl.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
-    }
+        // Badge (editable name + viewers)
+        const badge = document.createElement('div');
+        badge.className = 'badge';
 
-    function renderGrid() {
-      gridEl.innerHTML = '';
-      streams.forEach(s => {
-        const tile = document.createElement('div');
-        tile.className = 'tile';
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'name';
+        nameSpan.textContent = t.name || ('Slot ' + (i+1));
+        nameSpan.title = 'Click to rename';
+        nameSpan.contentEditable = true;
+        nameSpan.addEventListener('keydown', (ev)=>{
+          if (ev.key === 'Enter') { ev.preventDefault(); nameSpan.blur(); }
+        });
+        nameSpan.addEventListener('blur', ()=>{
+          const newName = nameSpan.textContent.trim() || t.name || ('Slot ' + (i+1));
+          t.name = newName;
+          localStorage.setItem(nameKey(t.id), newName);
+          nameSpan.textContent = newName;
+        });
+        badge.appendChild(nameSpan);
+
+        const count = document.createElement('span');
+        count.className = 'count';
+        count.textContent = (t.viewers ?? '-') + '';
+        badge.appendChild(count);
+        d.appendChild(badge);
+
+        // Video
+        const v = document.createElement('div');
+        v.className = 'video';
         const iframe = document.createElement('iframe');
-        iframe.src = s.playerUrl;
-        const overlay = document.createElement('div');
-        overlay.className = 'overlay';
-        overlay.textContent = `${s.name} (${s.viewers} viewers)`;
-        tile.appendChild(iframe);
-        tile.appendChild(overlay);
-        gridEl.appendChild(tile);
+        iframe.allow = 'autoplay; fullscreen';
+        iframe.src = t.url || 'about:blank';
+        v.appendChild(iframe);
+        d.appendChild(v);
+
+        // Actions
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+        const hideBtn = document.createElement('button');
+        hideBtn.textContent = 'Hide';
+        hideBtn.onclick = ()=> { t.visible = false; render(); layout(); };
+        actions.appendChild(hideBtn);
+        d.appendChild(actions);
+
+        // Keep refs for live updates
+        t._dom = { countEl: count, nameEl: nameSpan };
+        grid.appendChild(d);
       });
-      fitGrid();
+      layout();
     }
 
-    function updateViewerCounts() {
-      fetch('/.netlify/functions/millicast', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-          data.streams.forEach(s => {
-            const tile = [...gridEl.children].find(t => t.querySelector('.overlay').textContent.startsWith(s.name));
-            if (tile) {
-              tile.querySelector('.overlay').textContent = `${s.name} (${s.viewers} viewers)`;
-            }
+    // --- Merge updates without reloading iframes ---
+    function mergeUpdate(newList) {
+      const idx = new Map(tiles.map(t=>[t.id, t]));
+      const newIds = new Set();
+      newList.forEach(s => {
+        const id = s.id || s.name || s.playerUrl;
+        newIds.add(id);
+        const existing = idx.get(id);
+        if (existing) {
+          // update viewers only (and server name if user hasn't customized locally)
+          existing.viewers = s.viewers ?? existing.viewers ?? null;
+          if (existing._dom?.countEl) existing._dom.countEl.textContent = (existing.viewers ?? '-') + '';
+          if (!localStorage.getItem(nameKey(id))) {
+            existing.name = s.name || existing.name;
+            if (existing._dom?.nameEl) existing._dom.nameEl.textContent = existing.name;
+          }
+        } else {
+          const savedName = localStorage.getItem(nameKey(id));
+          tiles.push({
+            id,
+            name: savedName || s.name || 'Stream',
+            url: s.playerUrl || '',
+            viewers: s.viewers ?? null,
+            visible: true
           });
-          updateLastUpdated();
-        })
-        .catch(err => console.error('Error updating viewers', err));
+        }
+      });
+      // Hide those that disappeared from active
+      tiles = tiles.map(t => newIds.has(t.id) ? t : ({ ...t, visible: false }));
     }
 
-    getActiveBtn.addEventListener('click', fetchActive);
+    // --- Polling (every 5s) ---
+    async function refreshTick() {
+      try {
+        const list = await fetchActive();
+        mergeUpdate(list);
+        lastUpdateEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      } catch {}
+    }
+    function startPolling() {
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(refreshTick, 5000);
+    }
 
-    toggleAuto.addEventListener('change', () => {
-      if (toggleAuto.checked) {
-        autoTimer = setInterval(updateViewerCounts, parseInt(refreshIntervalEl.value));
-      } else {
-        clearInterval(autoTimer);
-      }
+    // --- Initial load ---
+    async function initialLoad() {
+      try{
+        const list = await fetchActive();
+        tiles = list.map(s => {
+          const id = s.id || s.name || s.playerUrl;
+          const savedName = localStorage.getItem(nameKey(id));
+          return { id, name: savedName || s.name || 'Stream', url: s.playerUrl || '', viewers: s.viewers ?? null, visible: true };
+        });
+        render();
+        lastUpdateEl.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+        startPolling();
+      } catch (e) {}
+    }
+
+    // --- Setup ---
+    window.addEventListener('DOMContentLoaded', () => {
+      header = document.getElementById('topbar');
+      stage = document.querySelector('.stage');
+      grid = document.getElementById('grid');
+      lastUpdateEl = document.getElementById('lastUpdate');
+
+      document.getElementById('btnActive').onclick = () => initialLoad();
+
+      const resizeHeaderVar = () => {
+        const h = header.getBoundingClientRect().height;
+        document.documentElement.style.setProperty('--header-h', Math.round(h) + 'px');
+      };
+      resizeHeaderVar();
+      new ResizeObserver(()=>{ resizeHeaderVar(); render(); }).observe(document.body);
+      new ResizeObserver(()=>{ render(); }).observe(stage);
+
+      // Show All button
+      document.getElementById('btnShowAll').onclick = () => { tiles = tiles.map(t=>({...t, visible:true})); render(); layout(); };
+
+      // auto load on open
+      initialLoad();
     });
-
-    refreshIntervalEl.addEventListener('change', () => {
-      if (toggleAuto.checked) {
-        clearInterval(autoTimer);
-        autoTimer = setInterval(updateViewerCounts, parseInt(refreshIntervalEl.value));
-      }
-    });
-
-    window.addEventListener('resize', fitGrid);
   </script>
 </body>
 </html>
