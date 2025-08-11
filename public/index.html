@@ -11,7 +11,7 @@
     button { background:#6d5bf6; color:#fff; border:0; padding:8px 12px; border-radius:10px; cursor:pointer; }
     button.secondary { background:#2f2f2f; }
     button:disabled { opacity:.6; cursor:default; }
-    input[type=text], select { padding:6px 8px; border-radius:8px; border:0; }
+    select { padding:6px 8px; border-radius:8px; border:0; }
     .spacer { flex:1; }
     .grid { display:grid; gap:12px; padding:12px; }
     .grid.auto { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
@@ -35,7 +35,7 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
   <script>
-    const { useState, useEffect, useMemo } = React;
+    const { useState, useEffect } = React;
 
     const ASPECTS = [
       { key:'16:9', val: 16/9 },
@@ -43,17 +43,10 @@
       { key:'1:1',  val: 1 },
       { key:'21:9', val: 21/9 },
       { key:'9:16', val: 9/16 },
-      { key:'auto', val: 16/9 }, // default fallback
     ];
-
     const DEFAULT_ASPECT = '16:9';
-
-    function getAspectValue(label){
-      const found = ASPECTS.find(a => a.key === label) || ASPECTS.find(a=>a.key===DEFAULT_ASPECT);
-      return found.val;
-    }
-
-    function storageKeyFor(url){ return 'mv_ratio_' + (url || 'blank'); }
+    const aspectVal = (label) => (ASPECTS.find(a=>a.key===label)?.val || 16/9);
+    const ratioKey = (url) => 'mv_ratio_' + (url || 'blank');
 
     async function fetchActiveStreams() {
       const r = await fetch('/.netlify/functions/millicast', { method:'POST' });
@@ -61,43 +54,29 @@
       return (await r.json()).streams;
     }
 
-    async function askAssistant(prompt) {
-      const r = await fetch('/.netlify/functions/assistant', {
-        method:'POST',
-        headers:{ 'Content-Type':'application/json' },
-        body: JSON.stringify({ prompt })
-      });
-      if (!r.ok) throw new Error(await r.text());
-      return await r.json();
-    }
-
     function App(){
-      const [tiles, setTiles] = useState([]); // [{name, url, visible:true, aspect:'16:9'}]
-      const [loading, setLoading] = useState(false);
+      const [tiles, setTiles] = useState([]); // {name,url,visible,aspect}
       const [err, setErr] = useState('');
-      const [cmd, setCmd] = useState('');
       const [limit, setLimit] = useState('all');
       const [spot, setSpot] = useState(null);
 
-      // Load actives and restore saved aspect ratios
+      // Load actives and restore aspect per URL
       useEffect(()=>{
         (async () => {
           try{
-            setLoading(true); setErr('');
+            setErr('');
             const streams = await fetchActiveStreams();
             const mapped = streams.map(s => {
               const url = s.playerUrl || '';
-              const saved = localStorage.getItem(storageKeyFor(url));
-              const aspect = saved || DEFAULT_ASPECT;
-              return { name: s.name || 'Stream', url, visible: true, aspect };
+              const saved = localStorage.getItem(ratioKey(url));
+              return { name: s.name || 'Stream', url, visible: true, aspect: saved || DEFAULT_ASPECT };
             });
             setTiles(mapped);
           }catch(e){ setErr(e.message || 'Failed to load active streams'); }
-          finally{ setLoading(false); }
         })();
       },[]);
 
-      // Limit visible count
+      // Apply limit
       useEffect(()=>{
         setTiles(prev => {
           const total = prev.length;
@@ -110,107 +89,30 @@
         });
       }, [limit]);
 
-      function showAll(){ setTiles(prev => prev.map(t => ({ ...t, visible: true }))); setLimit('all'); }
-      function hideAll(){ setTiles(prev => prev.map(t => ({ ...t, visible: false }))); }
-      function toggleVisible(index){ setTiles(prev => prev.map((t,i) => i===index ? ({ ...t, visible: !t.visible }) : t)); }
-
-      function changeAspect(index, label){
-        setTiles(prev => prev.map((t,i) => {
-          if (i!==index) return t;
-          localStorage.setItem(storageKeyFor(t.url), label);
-          return { ...t, aspect: label };
-        }));
-      }
-
-      function applyIntent(intent){
-        if (!intent || !intent.type) return;
-        if (intent.type === 'fullscreen') {
-          const idx = intent.slot - 1;
-          setSpot(Number.isInteger(idx) ? idx : null);
-        }
-        if (intent.type === 'swap') {
-          const a = intent.a - 1, b = intent.b - 1;
-          setTiles(prev => {
-            const copy = prev.slice();
-            if (copy[a] && copy[b]) { const t = copy[a]; copy[a] = copy[b]; copy[b] = t; }
-            return copy;
-          });
-        }
-        if (intent.type === 'loadActive') {
-          (async () => {
-            try{
-              setLoading(true); setErr('');
-              const streams = await fetchActiveStreams();
-              const mapped = streams.map(s => {
-                const url = s.playerUrl || '';
-                const saved = localStorage.getItem(storageKeyFor(url));
-                const aspect = saved || DEFAULT_ASPECT;
-                return { name: s.name || 'Stream', url, visible: true, aspect };
-              });
-              setTiles(mapped);
-              setLimit('all');
-            }catch(e){ setErr(e.message || 'Failed to load active streams'); }
-            finally{ setLoading(false); }
-          })();
-        }
-        if (intent.type === 'setStream') {
-          const idx = intent.slot - 1;
-          setTiles(prev => prev.map((t,i)=> {
-            if (i!==idx) return t;
-            const newUrl = intent.playerUrl;
-            const saved = localStorage.getItem(storageKeyFor(newUrl));
-            const aspect = saved || DEFAULT_ASPECT;
-            return ({ ...t, url:newUrl, visible: true, aspect });
-          }));
-        }
-        if (intent.type === 'nameSlot') {
-          const idx = intent.slot - 1;
-          setTiles(prev => prev.map((t,i)=> i===idx ? ({ ...t, name:intent.name }) : t));
-        }
-        if (intent.type === 'preset') {
-          if (intent.action === 'save') {
-            const preset = { tiles };
-            localStorage.setItem('mv_preset_' + intent.name, JSON.stringify(preset));
-          } else if (intent.action === 'load') {
-            const raw = localStorage.getItem('mv_preset_' + intent.name);
-            if (raw) { try { const p = JSON.parse(raw); setTiles(p.tiles || []); } catch {} }
-          } else if (intent.action === 'delete') {
-            localStorage.removeItem('mv_preset_' + intent.name);
-          }
-        }
-      }
-
-      async function runCommand(){
-        if (!cmd.trim()) return;
-        try {
-          setErr('');
-          const intent = await askAssistant(cmd.trim());
-          applyIntent(intent);
-          setCmd('');
-        } catch(e){
-          setErr(e.message || 'Assistant error');
-        }
-      }
+      const showAll = ()=>{ setTiles(prev => prev.map(t => ({ ...t, visible: true }))); setLimit('all'); };
+      const hideAll = ()=> setTiles(prev => prev.map(t => ({ ...t, visible: false })));
+      const toggleVisible = (i)=> setTiles(prev => prev.map((t,idx)=> idx===i ? ({...t, visible:!t.visible}) : t));
+      const changeAspect = (i,label)=> setTiles(prev => prev.map((t,idx)=>{
+        if(idx!==i) return t;
+        localStorage.setItem(ratioKey(t.url), label);
+        return {...t, aspect: label};
+      }));
 
       return React.createElement(React.Fragment, null,
         React.createElement('header', null,
-          React.createElement('button', { onClick: () => { (async ()=>{ try{ setLoading(true); setErr(''); const s=await fetchActiveStreams(); const mapped=s.map(x=>{ const url=x.playerUrl||''; const saved=localStorage.getItem(storageKeyFor(url)); const aspect=saved||DEFAULT_ASPECT; return({name:x.name||'Stream', url, visible:true, aspect});}); setTiles(mapped); setLimit('all'); }catch(e){ setErr(e.message||'Failed'); } finally{ setLoading(false);} })(); } }, 'Reload Active'),
-          React.createElement('button', { className:'secondary', onClick: showAll }, 'Show All'),
+          React.createElement('button', { onClick: showAll }, 'Show All'),
           React.createElement('button', { className:'secondary', onClick: hideAll }, 'Hide All'),
           React.createElement('span', null, 'Limit:'),
           React.createElement('select', { value: String(limit), onChange: e=> setLimit(e.target.value) },
             React.createElement('option', { value:'all' }, 'All'),
             [1,2,3,4,5,6,8,9,10,12,16,20,25,36].map(n => React.createElement('option', { key:n, value:String(n) }, String(n)))
-          ),
-          React.createElement('div', { className:'spacer' }),
-          React.createElement('input', { type:'text', placeholder:"Command: 'fullscreen 2', 'swap 1 and 3', 'load active'", value:cmd, onChange:e=>setCmd(e.target.value), onKeyDown:e=>{if(e.key==='Enter') runCommand();}, style:{ width:420 } }),
-          React.createElement('button', { onClick: runCommand }, 'Send')
+          )
         ),
         err && React.createElement('div', { className:'error' }, err),
         (spot !== null) ? React.createElement('div', { className:'spotwrap' },
           React.createElement('div', { className:'tile spot' },
             React.createElement('div', { className:'badge' }, tiles[spot]?.name || 'Slot'),
-            React.createElement('div', { className:'video', style:{ aspectRatio: getAspectValue(tiles[spot]?.aspect || DEFAULT_ASPECT) } },
+            React.createElement('div', { className:'video', style:{ aspectRatio: aspectVal(tiles[spot]?.aspect || DEFAULT_ASPECT) } },
               React.createElement('iframe', { src: tiles[spot]?.url || 'about:blank', allow:'autoplay; fullscreen' })
             ),
             React.createElement('div', { className:'actions' },
@@ -225,7 +127,7 @@
                 ASPECTS.map(a => React.createElement('option', { key:a.key, value:a.key }, a.key))
               )
             ),
-            React.createElement('div', { className:'video', style:{ aspectRatio: getAspectValue(t.aspect) } },
+            React.createElement('div', { className:'video', style:{ aspectRatio: aspectVal(t.aspect) } },
               React.createElement('iframe', { src: t.url || 'about:blank', allow:'autoplay; fullscreen' })
             ),
             React.createElement('div', { className:'actions' },
