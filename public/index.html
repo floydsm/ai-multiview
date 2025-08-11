@@ -1,205 +1,180 @@
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Millicast Multiviewer (Fit-to-Screen)</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Millicast Multiviewer</title>
   <style>
-    :root { color-scheme: dark; }
-    html, body { height: 100%; }
-    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#111; color:#fff; overflow:hidden; }
-    header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:12px; background:#1a1a1a; position:relative; z-index:1; }
-    button { background:#6d5bf6; color:#fff; border:0; padding:8px 12px; border-radius:10px; cursor:pointer; }
-    button.secondary { background:#2f2f2f; }
-    select, input[type=text] { padding:6px 8px; border-radius:8px; border:0; }
-    .stage { height: calc(100vh - var(--header-h, 60px)); padding:12px; box-sizing: border-box; }
-    .grid { display:grid; gap:12px; width:100%; height:100%; }
-    .tile { background:#000; border-radius:12px; position:relative; overflow:hidden; }
-    .badge { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:4px 8px; border-radius:8px; font-size:12px; z-index:2; display:flex; gap:6px; align-items:center; }
-    .count { background:rgba(255,255,255,.12); padding:2px 6px; border-radius:999px; font-size:11px; }
-    .meta { position:absolute; right:8px; top:8px; display:flex; gap:6px; z-index:2; }
-    .meta select, .meta input { background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.2); }
-    .tile .actions { position:absolute; right:8px; bottom:8px; display:flex; gap:6px; z-index:2; }
-    .tile .actions button { font-size:12px; background:rgba(255,255,255,.2); }
-    .video { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
-    .video iframe { width:100%; height:100%; border:0; object-fit:contain; }
-    .error { background:#b00020; padding:8px 12px; margin:12px; border-radius:8px; }
+    body {
+      margin: 0;
+      background: black;
+      color: white;
+      font-family: sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+    header {
+      background: #111;
+      padding: 0.5em;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 1em;
+      flex-wrap: wrap;
+    }
+    header button, header label, header select, header input {
+      font-size: 1em;
+      padding: 0.3em 0.6em;
+      border: none;
+      border-radius: 4px;
+    }
+    header button {
+      background: #444;
+      color: white;
+      cursor: pointer;
+    }
+    header button:hover {
+      background: #666;
+    }
+    #grid {
+      flex: 1;
+      display: grid;
+      gap: 2px;
+      background: black;
+      padding: 2px;
+    }
+    iframe {
+      width: 100%;
+      height: 100%;
+      border: none;
+      background: black;
+      object-fit: contain;
+    }
+    .tile {
+      position: relative;
+      background: black;
+    }
+    .overlay {
+      position: absolute;
+      top: 4px;
+      left: 4px;
+      background: rgba(0, 0, 0, 0.6);
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 0.9em;
+    }
+    .hidden {
+      display: none;
+    }
   </style>
 </head>
 <body>
-  <header id="topbar">
-    <button id="btnActive">Get Active</button>
-    <button class="secondary" id="btnShowAll">Show All</button>
-    <button class="secondary" id="btnHideAll">Hide All</button>
-    <span style="margin-left:8px;">Limit:</span>
-    <select id="limit">
-      <option value="all">All</option>
-      <option>1</option><option>2</option><option>3</option><option>4</option>
-      <option>5</option><option>6</option><option>8</option><option>9</option>
-      <option>10</option><option>12</option><option>16</option><option>20</option><option>25</option><option>36</option>
+  <header>
+    <button id="getActive">Get Active</button>
+    <label><input type="checkbox" id="toggleAuto" /> Auto refresh</label>
+    <select id="refreshInterval">
+      <option value="5000">5s</option>
+      <option value="10000" selected>10s</option>
+      <option value="30000">30s</option>
     </select>
-    <div style="flex:1"></div>
-    <span id="status" style="opacity:.75"></span>
+    <span id="lastUpdated" style="font-size:0.9em;opacity:0.8"></span>
   </header>
-
-  <div class="stage">
-    <div id="grid" class="grid"></div>
-  </div>
+  <div id="grid"></div>
 
   <script>
-    const TARGET_RATIO = 16/9; // layout assumes 16:9; individual iframes are 'contain' so other ratios still fit
-    let tiles = []; // {id,name,url,viewers,visible,ratioLabel}
-    let container, header, grid, limitEl, statusEl;
+    const gridEl = document.getElementById('grid');
+    const getActiveBtn = document.getElementById('getActive');
+    const toggleAuto = document.getElementById('toggleAuto');
+    const refreshIntervalEl = document.getElementById('refreshInterval');
+    const lastUpdatedEl = document.getElementById('lastUpdated');
+    let streams = [];
+    let autoTimer = null;
 
-    const ASPECTS = { "16:9":16/9, "4:3":4/3, "1:1":1, "21:9":21/9, "9:16":9/16 };
-    const nameKey = (id)=>'mv_name_'+(id||'blank');
-    const ratioKey = (id)=>'mv_ratio_'+(id||'blank');
-
-    async function getActive() {
-      const r = await fetch('/.netlify/functions/millicast', { method:'POST' });
-      if (!r.ok) throw new Error(await r.text());
-      return (await r.json()).streams || [];
-    }
-
-    function applyLimit() {
-      const val = limitEl.value;
-      tiles = tiles.map((t,i)=> ({...t, visible: val==='all' ? true : i < parseInt(val) }));
-    }
-
-    function computeBestColumns(n, W, H, ratio) {
-      // Choose columns so total grid height fits <= H while maximizing tile size.
-      let bestC = 1, bestArea = -1;
-      for (let c = 1; c <= n; c++) {
-        const rows = Math.ceil(n / c);
-        const tileW = W / c;
-        const tileH = tileW / ratio;
-        const totalH = rows * tileH;
-        if (totalH <= H) {
-          const area = tileW * tileH;
-          if (area > bestArea) { bestArea = area; bestC = c; }
-        }
+    async function fetchActive() {
+      try {
+        const res = await fetch('/.netlify/functions/millicast', { method: 'POST' });
+        const data = await res.json();
+        streams = data.streams || [];
+        renderGrid();
+        updateLastUpdated();
+      } catch (e) {
+        console.error('Error fetching streams', e);
       }
-      // If none fit (very small screens), fall back to n columns
-      return bestArea < 0 ? Math.min(n, Math.max(1, Math.floor(W / 200))) : bestC;
     }
 
-    function layout() {
-      const visible = tiles.filter(t=>t.visible);
-      const n = visible.length;
-      const rect = container.getBoundingClientRect();
-      const W = rect.width, H = rect.height;
-      const cols = computeBestColumns(n || 1, W, H, TARGET_RATIO);
-      const rows = Math.ceil((n||1) / cols);
-
-      grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-      grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
-
-      // Each tile gets size via grid; inner <iframe> uses object-fit:contain to preserve per-stream ratio.
+    function updateLastUpdated() {
+      lastUpdatedEl.textContent = `Last updated: ${new Date().toLocaleTimeString()}`;
     }
 
-    function render() {
-      grid.innerHTML = '';
-      tiles.forEach((t, i) => {
-        if (!t.visible) return;
-        const d = document.createElement('div');
-        d.className = 'tile';
+    function fitGrid() {
+      const count = streams.length;
+      const containerHeight = window.innerHeight - document.querySelector('header').offsetHeight;
+      let cols = Math.ceil(Math.sqrt(count));
+      let rows = Math.ceil(count / cols);
+      let tileHeight = containerHeight / rows;
+      let tileWidth = window.innerWidth / cols;
+      let ratio = 16 / 9;
+      if (tileWidth / tileHeight > ratio) {
+        tileWidth = tileHeight * ratio;
+      } else {
+        tileHeight = tileWidth / ratio;
+      }
+      gridEl.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      gridEl.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+    }
 
-        // Badge (name + viewers)
-        const badge = document.createElement('div');
-        badge.className = 'badge';
-        badge.textContent = t.name || ('Slot ' + (i+1));
-        if (t.viewers != null) {
-          const c = document.createElement('span');
-          c.className = 'count';
-          c.textContent = t.viewers;
-          badge.appendChild(c);
-        }
-        d.appendChild(badge);
-
-        // Controls (rename + aspect)
-        const meta = document.createElement('div');
-        meta.className = 'meta';
-        const inp = document.createElement('input');
-        inp.value = t.name || '';
-        inp.size = 14;
-        inp.title = 'Custom name';
-        inp.onchange = (e)=> { localStorage.setItem(nameKey(t.id), e.target.value); t.name = e.target.value; badge.firstChild.nodeValue = e.target.value; };
-        meta.appendChild(inp);
-
-        const sel = document.createElement('select');
-        for (const k of Object.keys(ASPECTS)) {
-          const o = document.createElement('option');
-          o.value = k; o.textContent = k; if (t.ratioLabel===k) o.selected=true;
-          sel.appendChild(o);
-        }
-        sel.onchange = (e)=> { t.ratioLabel = e.target.value; localStorage.setItem(ratioKey(t.id), t.ratioLabel); };
-        meta.appendChild(sel);
-        d.appendChild(meta);
-
-        // Video (object-fit contain keeps whole frame visible)
-        const v = document.createElement('div');
-        v.className = 'video';
+    function renderGrid() {
+      gridEl.innerHTML = '';
+      streams.forEach(s => {
+        const tile = document.createElement('div');
+        tile.className = 'tile';
         const iframe = document.createElement('iframe');
-        iframe.allow = 'autoplay; fullscreen';
-        iframe.src = t.url || 'about:blank';
-        v.appendChild(iframe);
-        d.appendChild(v);
-
-        // Actions
-        const act = document.createElement('div');
-        act.className = 'actions';
-        const hideBtn = document.createElement('button');
-        hideBtn.textContent = 'Hide';
-        hideBtn.onclick = ()=> { t.visible=false; render(); layout(); };
-        act.appendChild(hideBtn);
-        d.appendChild(act);
-
-        grid.appendChild(d);
+        iframe.src = s.playerUrl;
+        const overlay = document.createElement('div');
+        overlay.className = 'overlay';
+        overlay.textContent = `${s.name} (${s.viewers} viewers)`;
+        tile.appendChild(iframe);
+        tile.appendChild(overlay);
+        gridEl.appendChild(tile);
       });
-      layout();
+      fitGrid();
     }
 
-    function resizeHeaderVar() {
-      const h = header.getBoundingClientRect().height;
-      document.documentElement.style.setProperty('--header-h', Math.round(h) + 'px');
+    function updateViewerCounts() {
+      fetch('/.netlify/functions/millicast', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+          data.streams.forEach(s => {
+            const tile = [...gridEl.children].find(t => t.querySelector('.overlay').textContent.startsWith(s.name));
+            if (tile) {
+              tile.querySelector('.overlay').textContent = `${s.name} (${s.viewers} viewers)`;
+            }
+          });
+          updateLastUpdated();
+        })
+        .catch(err => console.error('Error updating viewers', err));
     }
 
-    async function loadActive() {
-      status('Getting active…');
-      const list = await getActive();
-      tiles = list.map(s => {
-        const id = s.id || s.name || s.playerUrl;
-        const localName = localStorage.getItem(nameKey(id));
-        const localRatio = localStorage.getItem(ratioKey(id)) || '16:9';
-        return { id, name: localName || s.name || 'Stream', url: s.playerUrl || '', viewers: s.viewers ?? null, visible: true, ratioLabel: localRatio };
-      });
-      applyLimit();
-      render();
-      status(`Loaded ${tiles.filter(t=>t.visible).length}/${tiles.length} active`);
-    }
+    getActiveBtn.addEventListener('click', fetchActive);
 
-    function status(t) { statusEl.textContent = t || ''; }
-
-    window.addEventListener('DOMContentLoaded', () => {
-      header = document.getElementById('topbar');
-      container = document.querySelector('.stage');
-      grid = document.getElementById('grid');
-      limitEl = document.getElementById('limit');
-      statusEl = document.getElementById('status');
-
-      document.getElementById('btnActive').onclick = () => loadActive().catch(e=>status(e.message));
-      document.getElementById('btnShowAll').onclick = () => { tiles = tiles.map(t=>({...t, visible:true})); applyLimit(); render(); };
-      document.getElementById('btnHideAll').onclick = () => { tiles = tiles.map(t=>({...t, visible:false})); render(); };
-
-      limitEl.onchange = () => { applyLimit(); render(); };
-
-      resizeHeaderVar();
-      new ResizeObserver(()=>{ resizeHeaderVar(); render(); }).observe(document.body);
-      new ResizeObserver(()=>{ render(); }).observe(container);
-
-      // Auto-get on load
-      loadActive().catch(e=>status(e.message));
+    toggleAuto.addEventListener('change', () => {
+      if (toggleAuto.checked) {
+        autoTimer = setInterval(updateViewerCounts, parseInt(refreshIntervalEl.value));
+      } else {
+        clearInterval(autoTimer);
+      }
     });
+
+    refreshIntervalEl.addEventListener('change', () => {
+      if (toggleAuto.checked) {
+        clearInterval(autoTimer);
+        autoTimer = setInterval(updateViewerCounts, parseInt(refreshIntervalEl.value));
+      }
+    });
+
+    window.addEventListener('resize', fitGrid);
   </script>
 </body>
 </html>
