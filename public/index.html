@@ -3,18 +3,17 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Millicast Multiviewer</title>
+  <title>Millicast Multiviewer (Fit-to-Screen)</title>
   <style>
     :root { color-scheme: dark; }
-    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#111; color:#fff; }
-    header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:12px; background:#1a1a1a; position:sticky; top:0; z-index:10; }
+    html, body { height: 100%; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:#111; color:#fff; overflow:hidden; }
+    header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:12px; background:#1a1a1a; position:relative; z-index:1; }
     button { background:#6d5bf6; color:#fff; border:0; padding:8px 12px; border-radius:10px; cursor:pointer; }
     button.secondary { background:#2f2f2f; }
-    button:disabled { opacity:.6; cursor:default; }
     select, input[type=text] { padding:6px 8px; border-radius:8px; border:0; }
-    .spacer { flex:1; }
-    .grid { display:grid; gap:12px; padding:12px; }
-    .grid.auto { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .stage { height: calc(100vh - var(--header-h, 60px)); padding:12px; box-sizing: border-box; }
+    .grid { display:grid; gap:12px; width:100%; height:100%; }
     .tile { background:#000; border-radius:12px; position:relative; overflow:hidden; }
     .badge { position:absolute; left:8px; top:8px; background:rgba(0,0,0,.6); padding:4px 8px; border-radius:8px; font-size:12px; z-index:2; display:flex; gap:6px; align-items:center; }
     .count { background:rgba(255,255,255,.12); padding:2px 6px; border-radius:999px; font-size:11px; }
@@ -22,37 +21,39 @@
     .meta select, .meta input { background:rgba(255,255,255,.12); color:#fff; border:1px solid rgba(255,255,255,.2); }
     .tile .actions { position:absolute; right:8px; bottom:8px; display:flex; gap:6px; z-index:2; }
     .tile .actions button { font-size:12px; background:rgba(255,255,255,.2); }
+    .video { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; }
+    .video iframe { width:100%; height:100%; border:0; object-fit:contain; }
     .error { background:#b00020; padding:8px 12px; margin:12px; border-radius:8px; }
-    .video { position: relative; width: 100%; background:#000; }
-    .video iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-    .spotwrap { padding:12px; display:flex; justify-content:center; }
-    .spot { width: min(92vw, 1600px); }
   </style>
 </head>
 <body>
-  <div id="root"></div>
+  <header id="topbar">
+    <button id="btnActive">Get Active</button>
+    <button class="secondary" id="btnShowAll">Show All</button>
+    <button class="secondary" id="btnHideAll">Hide All</button>
+    <span style="margin-left:8px;">Limit:</span>
+    <select id="limit">
+      <option value="all">All</option>
+      <option>1</option><option>2</option><option>3</option><option>4</option>
+      <option>5</option><option>6</option><option>8</option><option>9</option>
+      <option>10</option><option>12</option><option>16</option><option>20</option><option>25</option><option>36</option>
+    </select>
+    <div style="flex:1"></div>
+    <span id="status" style="opacity:.75"></span>
+  </header>
 
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <div class="stage">
+    <div id="grid" class="grid"></div>
+  </div>
 
   <script>
-    const { useState, useEffect } = React;
+    const TARGET_RATIO = 16/9; // layout assumes 16:9; individual iframes are 'contain' so other ratios still fit
+    let tiles = []; // {id,name,url,viewers,visible,ratioLabel}
+    let container, header, grid, limitEl, statusEl;
 
-    // ---- Settings ----
-    const AUTO_LOAD_ON_OPEN = true; // set to false if you prefer manual only
-
-    const ASPECTS = [
-      { key:'16:9', val: 16/9 },
-      { key:'4:3',  val: 4/3 },
-      { key:'1:1',  val: 1 },
-      { key:'21:9', val: 21/9 },
-      { key:'9:16', val: 9/16 },
-    ];
-    const DEFAULT_ASPECT = '16:9';
-    const aspectVal = (label) => (ASPECTS.find(a=>a.key===label)?.val || 16/9);
-
-    const ratioKey = (id) => 'mv_ratio_' + (id || 'blank');
-    const nameKey  = (id) => 'mv_name_'  + (id || 'blank');
+    const ASPECTS = { "16:9":16/9, "4:3":4/3, "1:1":1, "21:9":21/9, "9:16":9/16 };
+    const nameKey = (id)=>'mv_name_'+(id||'blank');
+    const ratioKey = (id)=>'mv_ratio_'+(id||'blank');
 
     async function getActive() {
       const r = await fetch('/.netlify/functions/millicast', { method:'POST' });
@@ -60,118 +61,145 @@
       return (await r.json()).streams || [];
     }
 
-    function App(){
-      const [tiles, setTiles] = useState([]); // {id,name,url,viewers,visible,aspect}
-      const [err, setErr] = useState('');
-      const [limit, setLimit] = useState('all');
-      const [spot, setSpot] = useState(null);
-      const [loading, setLoading] = useState(false);
-
-      async function loadActive(){
-        try{
-          setLoading(true); setErr('');
-          const streams = await getActive();
-          const mapped = streams.map(s => {
-            const id = s.id || s.name || s.playerUrl;
-            const localName = localStorage.getItem(nameKey(id));
-            const url = s.playerUrl || '';
-            const savedAspect = localStorage.getItem(ratioKey(id));
-            return {
-              id,
-              name: localName || s.name || 'Stream',
-              url,
-              viewers: s.viewers ?? null,
-              visible: true,
-              aspect: savedAspect || DEFAULT_ASPECT
-            };
-          });
-          setTiles(mapped);
-          setLimit('all');
-        }catch(e){ setErr(e.message || 'Failed to load active streams'); }
-        finally{ setLoading(false); }
-      }
-
-      useEffect(()=>{ if (AUTO_LOAD_ON_OPEN) loadActive(); },[]);
-
-      // Apply limit
-      useEffect(()=>{
-        setTiles(prev => {
-          const total = prev.length;
-          let n = total;
-          if (limit !== 'all') {
-            const parsed = parseInt(limit, 10);
-            if (!isNaN(parsed) && parsed >= 0) n = Math.min(parsed, total);
-          }
-          return prev.map((t, i) => ({ ...t, visible: i < n }));
-        });
-      }, [limit]);
-
-      const showAll = ()=>{ setTiles(prev => prev.map(t => ({ ...t, visible: true }))); setLimit('all'); };
-      const hideAll = ()=> setTiles(prev => prev.map(t => ({ ...t, visible: false })));
-      const toggleVisible = (i)=> setTiles(prev => prev.map((t,idx)=> idx===i ? ({...t, visible:!t.visible}) : t));
-      const changeAspect = (i,label)=> setTiles(prev => prev.map((t,idx)=>{
-        if(idx!==i) return t;
-        localStorage.setItem(ratioKey(t.id), label);
-        return {...t, aspect: label};
-      }));
-      const rename = (i, val)=> setTiles(prev => prev.map((t,idx)=>{
-        if(idx!==i) return t;
-        localStorage.setItem(nameKey(t.id), val);
-        return {...t, name: val};
-      }));
-
-      return React.createElement(React.Fragment, null,
-        React.createElement('header', null,
-          React.createElement('button', { onClick: loadActive, disabled: loading }, loading ? 'Getting Active…' : 'Get Active'),
-          React.createElement('button', { className:'secondary', onClick: showAll }, 'Show All'),
-          React.createElement('button', { className:'secondary', onClick: hideAll }, 'Hide All'),
-          React.createElement('span', null, 'Limit:'),
-          React.createElement('select', { value: String(limit), onChange: e=> setLimit(e.target.value) },
-            React.createElement('option', { value:'all' }, 'All'),
-            [1,2,3,4,5,6,8,9,10,12,16,20,25,36].map(n => React.createElement('option', { key:n, value:String(n) }, String(n)))
-          )
-        ),
-        err && React.createElement('div', { className:'error' }, err),
-        (spot !== null) ? React.createElement('div', { className:'spotwrap' },
-          React.createElement('div', { className:'tile spot' },
-            React.createElement('div', { className:'badge' },
-              tiles[spot]?.name || 'Slot',
-              tiles[spot]?.viewers != null && React.createElement('span', { className:'count', title:'Viewers' }, tiles[spot].viewers)
-            ),
-            React.createElement('div', { className:'video', style:{ aspectRatio: aspectVal(tiles[spot]?.aspect || DEFAULT_ASPECT) } },
-              React.createElement('iframe', { src: tiles[spot]?.url || 'about:blank', allow:'autoplay; fullscreen' })
-            ),
-            React.createElement('div', { className:'actions' },
-              React.createElement('button', { onClick:()=>setSpot(null) }, 'Exit Fullscreen')
-            )
-          )
-        ) : React.createElement('div', { className:'grid auto' },
-          tiles.map((t,i)=> t.visible && React.createElement('div', { key:i, className:'tile' },
-            React.createElement('div', { className:'badge' },
-              t.name || ('Slot ' + (i+1)),
-              t.viewers != null && React.createElement('span', { className:'count', title:'Viewers' }, t.viewers)
-            ),
-            React.createElement('div', { className:'meta' },
-              React.createElement('input', {
-                value: t.name, onChange: e=>rename(i, e.target.value), title:'Custom name', size: 14
-              }),
-              React.createElement('select', { value: t.aspect, onChange:e=>changeAspect(i, e.target.value), title:'Aspect ratio' },
-                ASPECTS.map(a => React.createElement('option', { key:a.key, value:a.key }, a.key))
-              )
-            ),
-            React.createElement('div', { className:'video', style:{ aspectRatio: aspectVal(t.aspect) } },
-              React.createElement('iframe', { src: t.url || 'about:blank', allow:'autoplay; fullscreen' })
-            ),
-            React.createElement('div', { className:'actions' },
-              React.createElement('button', { onClick:()=>setSpot(i) }, 'Fullscreen'),
-              React.createElement('button', { onClick:()=>toggleVisible(i) }, 'Hide')
-            )
-          ))
-        )
-      );
+    function applyLimit() {
+      const val = limitEl.value;
+      tiles = tiles.map((t,i)=> ({...t, visible: val==='all' ? true : i < parseInt(val) }));
     }
 
-    ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App));
+    function computeBestColumns(n, W, H, ratio) {
+      // Choose columns so total grid height fits <= H while maximizing tile size.
+      let bestC = 1, bestArea = -1;
+      for (let c = 1; c <= n; c++) {
+        const rows = Math.ceil(n / c);
+        const tileW = W / c;
+        const tileH = tileW / ratio;
+        const totalH = rows * tileH;
+        if (totalH <= H) {
+          const area = tileW * tileH;
+          if (area > bestArea) { bestArea = area; bestC = c; }
+        }
+      }
+      // If none fit (very small screens), fall back to n columns
+      return bestArea < 0 ? Math.min(n, Math.max(1, Math.floor(W / 200))) : bestC;
+    }
+
+    function layout() {
+      const visible = tiles.filter(t=>t.visible);
+      const n = visible.length;
+      const rect = container.getBoundingClientRect();
+      const W = rect.width, H = rect.height;
+      const cols = computeBestColumns(n || 1, W, H, TARGET_RATIO);
+      const rows = Math.ceil((n||1) / cols);
+
+      grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+      grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+
+      // Each tile gets size via grid; inner <iframe> uses object-fit:contain to preserve per-stream ratio.
+    }
+
+    function render() {
+      grid.innerHTML = '';
+      tiles.forEach((t, i) => {
+        if (!t.visible) return;
+        const d = document.createElement('div');
+        d.className = 'tile';
+
+        // Badge (name + viewers)
+        const badge = document.createElement('div');
+        badge.className = 'badge';
+        badge.textContent = t.name || ('Slot ' + (i+1));
+        if (t.viewers != null) {
+          const c = document.createElement('span');
+          c.className = 'count';
+          c.textContent = t.viewers;
+          badge.appendChild(c);
+        }
+        d.appendChild(badge);
+
+        // Controls (rename + aspect)
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        const inp = document.createElement('input');
+        inp.value = t.name || '';
+        inp.size = 14;
+        inp.title = 'Custom name';
+        inp.onchange = (e)=> { localStorage.setItem(nameKey(t.id), e.target.value); t.name = e.target.value; badge.firstChild.nodeValue = e.target.value; };
+        meta.appendChild(inp);
+
+        const sel = document.createElement('select');
+        for (const k of Object.keys(ASPECTS)) {
+          const o = document.createElement('option');
+          o.value = k; o.textContent = k; if (t.ratioLabel===k) o.selected=true;
+          sel.appendChild(o);
+        }
+        sel.onchange = (e)=> { t.ratioLabel = e.target.value; localStorage.setItem(ratioKey(t.id), t.ratioLabel); };
+        meta.appendChild(sel);
+        d.appendChild(meta);
+
+        // Video (object-fit contain keeps whole frame visible)
+        const v = document.createElement('div');
+        v.className = 'video';
+        const iframe = document.createElement('iframe');
+        iframe.allow = 'autoplay; fullscreen';
+        iframe.src = t.url || 'about:blank';
+        v.appendChild(iframe);
+        d.appendChild(v);
+
+        // Actions
+        const act = document.createElement('div');
+        act.className = 'actions';
+        const hideBtn = document.createElement('button');
+        hideBtn.textContent = 'Hide';
+        hideBtn.onclick = ()=> { t.visible=false; render(); layout(); };
+        act.appendChild(hideBtn);
+        d.appendChild(act);
+
+        grid.appendChild(d);
+      });
+      layout();
+    }
+
+    function resizeHeaderVar() {
+      const h = header.getBoundingClientRect().height;
+      document.documentElement.style.setProperty('--header-h', Math.round(h) + 'px');
+    }
+
+    async function loadActive() {
+      status('Getting active…');
+      const list = await getActive();
+      tiles = list.map(s => {
+        const id = s.id || s.name || s.playerUrl;
+        const localName = localStorage.getItem(nameKey(id));
+        const localRatio = localStorage.getItem(ratioKey(id)) || '16:9';
+        return { id, name: localName || s.name || 'Stream', url: s.playerUrl || '', viewers: s.viewers ?? null, visible: true, ratioLabel: localRatio };
+      });
+      applyLimit();
+      render();
+      status(`Loaded ${tiles.filter(t=>t.visible).length}/${tiles.length} active`);
+    }
+
+    function status(t) { statusEl.textContent = t || ''; }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      header = document.getElementById('topbar');
+      container = document.querySelector('.stage');
+      grid = document.getElementById('grid');
+      limitEl = document.getElementById('limit');
+      statusEl = document.getElementById('status');
+
+      document.getElementById('btnActive').onclick = () => loadActive().catch(e=>status(e.message));
+      document.getElementById('btnShowAll').onclick = () => { tiles = tiles.map(t=>({...t, visible:true})); applyLimit(); render(); };
+      document.getElementById('btnHideAll').onclick = () => { tiles = tiles.map(t=>({...t, visible:false})); render(); };
+
+      limitEl.onchange = () => { applyLimit(); render(); };
+
+      resizeHeaderVar();
+      new ResizeObserver(()=>{ resizeHeaderVar(); render(); }).observe(document.body);
+      new ResizeObserver(()=>{ render(); }).observe(container);
+
+      // Auto-get on load
+      loadActive().catch(e=>status(e.message));
+    });
   </script>
 </body>
 </html>
